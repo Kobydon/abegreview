@@ -518,7 +518,6 @@ def get_menu(restaurant_id):
     menu_items = MenuItem.query.filter_by(restaurant_id=restaurant_id).all()
     return menu_items_schema.jsonify(menu_items)
 
-
 @restaurant.route('/analytics/premium/<int:restaurant_id>', methods=['GET'])
 @flask_praetorian.auth_required
 def get_premium_analytics(restaurant_id):
@@ -533,15 +532,13 @@ def get_premium_analytics(restaurant_id):
             Feedback.timestamp >= start_date
         )
         
-        # 1. Percentage of users rating service low (1-2 stars)
+        # 1. Percentage of users rating service low (1–2 stars)
         total_feedbacks = base_query.count()
         low_service_feedbacks = base_query.filter(
             Feedback.rating_service.in_([1, 2])
         ).count()
         
-        low_service_percentage = 0
-        if total_feedbacks > 0:
-            low_service_percentage = (low_service_feedbacks / total_feedbacks) * 100
+        low_service_percentage = (low_service_feedbacks / total_feedbacks * 100) if total_feedbacks > 0 else 0
         
         # 2. Suggestions collected (comments)
         suggestions = base_query.filter(
@@ -554,8 +551,7 @@ def get_premium_analytics(restaurant_id):
             Feedback.rating_overall
         ).order_by(Feedback.timestamp.desc()).all()
         
-        # 3. Time-based trends
-        # Daily averages for the last 30 days
+        # 3. Time-based trends (convert SQL date string to ISO manually)
         daily_trends = db.session.query(
             func.date(Feedback.timestamp).label('date'),
             func.avg(Feedback.rating_service).label('avg_service'),
@@ -612,6 +608,7 @@ def get_premium_analytics(restaurant_id):
         total_with_recommendation = sum(stat.count for stat in recommend_stats)
         recommendation_rate = (total_recommendations / total_with_recommendation * 100) if total_with_recommendation > 0 else 0
         
+        # Prepare response
         return jsonify({
             'success': True,
             'analytics': {
@@ -629,14 +626,14 @@ def get_premium_analytics(restaurant_id):
                 'suggestions': [
                     {
                         'comment': suggestion.comment,
-                        'timestamp': suggestion.timestamp.isoformat(),
+                        'timestamp': suggestion.timestamp.isoformat() if isinstance(suggestion.timestamp, datetime) else str(suggestion.timestamp),
                         'service_rating': suggestion.rating_service,
                         'overall_rating': suggestion.rating_overall
                     } for suggestion in suggestions
                 ],
                 'time_trends': [
                     {
-                        'date': trend.date.isoformat(),
+                        'date': str(trend.date),  # FIX: directly convert to string
                         'avg_service': float(trend.avg_service or 0),
                         'avg_food': float(trend.avg_food or 0),
                         'avg_cleanliness': float(trend.avg_cleanliness or 0),
