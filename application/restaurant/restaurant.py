@@ -4,6 +4,7 @@ from application.settings.setup import app
 from application.database.user.user_db import db, User, Restaurant,Feedback,Subscription,MenuItem,SavedPlace
 from datetime import datetime
 import flask_praetorian
+from datetime import datetime, timedelta
 from flask_marshmallow import Marshmallow
 
 restaurant = Blueprint("restaurant", __name__)
@@ -517,3 +518,144 @@ def get_menu(restaurant_id):
     menu_items = MenuItem.query.filter_by(restaurant_id=restaurant_id).all()
     return menu_items_schema.jsonify(menu_items)
 
+
+@restaurant.route('/analytics/premium/<int:restaurant_id>', methods=['GET'])
+@flask_praetorian.auth_required
+def get_premium_analytics(restaurant_id):
+    try:
+        # Get date range from query parameters
+        days = request.args.get('days', default=30, type=int)
+        start_date = datetime.utcnow() - timedelta(days=days)
+        
+        # Base query for the restaurant
+        base_query = Feedback.query.filter(
+            Feedback.restaurant_id == restaurant_id,
+            Feedback.timestamp >= start_date
+        )
+        
+        # 1. Percentage of users rating service low (1-2 stars)
+        total_feedbacks = base_query.count()
+        low_service_feedbacks = base_query.filter(
+            Feedback.rating_service.in_([1, 2])
+        ).count()
+        
+        low_service_percentage = 0
+        if total_feedbacks > 0:
+            low_service_percentage = (low_service_feedbacks / total_feedbacks) * 100
+        
+        # 2. Suggestions collected (comments)
+        suggestions = base_query.filter(
+            Feedback.comment.isnot(None),
+            Feedback.comment != ''
+        ).with_entities(
+            Feedback.comment,
+            Feedback.timestamp,
+            Feedback.rating_service,
+            Feedback.rating_overall
+        ).order_by(Feedback.timestamp.desc()).all()
+        
+        # 3. Time-based trends
+        # Daily averages for the last 30 days
+        daily_trends = db.session.query(
+            func.date(Feedback.timestamp).label('date'),
+            func.avg(Feedback.rating_service).label('avg_service'),
+            func.avg(Feedback.rating_food).label('avg_food'),
+            func.avg(Feedback.rating_cleanliness).label('avg_cleanliness'),
+            func.avg(Feedback.rating_overall).label('avg_overall'),
+            func.count(Feedback.id).label('feedback_count')
+        ).filter(
+            Feedback.restaurant_id == restaurant_id,
+            Feedback.timestamp >= start_date
+        ).group_by(
+            func.date(Feedback.timestamp)
+        ).order_by(
+            func.date(Feedback.timestamp)
+        ).all()
+        
+        # 4. Rating distribution for service
+        service_distribution = db.session.query(
+            Feedback.rating_service,
+            func.count(Feedback.id).label('count')
+        ).filter(
+            Feedback.restaurant_id == restaurant_id,
+            Feedback.timestamp >= start_date
+        ).group_by(
+            Feedback.rating_service
+        ).order_by(
+            Feedback.rating_service
+        ).all()
+        
+        # 5. Overall statistics
+        avg_ratings = db.session.query(
+            func.avg(Feedback.rating_service).label('avg_service'),
+            func.avg(Feedback.rating_food).label('avg_food'),
+            func.avg(Feedback.rating_cleanliness).label('avg_cleanliness'),
+            func.avg(Feedback.rating_overall).label('avg_overall')
+        ).filter(
+            Feedback.restaurant_id == restaurant_id,
+            Feedback.timestamp >= start_date
+        ).first()
+        
+        # 6. Recommendation rate
+        recommend_stats = db.session.query(
+            Feedback.recommend,
+            func.count(Feedback.id).label('count')
+        ).filter(
+            Feedback.restaurant_id == restaurant_id,
+            Feedback.timestamp >= start_date,
+            Feedback.recommend.isnot(None)
+        ).group_by(
+            Feedback.recommend
+        ).all()
+        
+        total_recommendations = sum(stat.count for stat in recommend_stats if stat.recommend)
+        total_with_recommendation = sum(stat.count for stat in recommend_stats)
+        recommendation_rate = (total_recommendations / total_with_recommendation * 100) if total_with_recommendation > 0 else 0
+        
+        return jsonify({
+            'success': True,
+            'analytics': {
+                'summary': {
+                    'total_feedbacks': total_feedbacks,
+                    'low_service_percentage': round(low_service_percentage, 2),
+                    'recommendation_rate': round(recommendation_rate, 2),
+                    'average_ratings': {
+                        'service': round(avg_ratings.avg_service or 0, 2),
+                        'food': round(avg_ratings.avg_food or 0, 2),
+                        'cleanliness': round(avg_ratings.avg_cleanliness or 0, 2),
+                        'overall': round(avg_ratings.avg_overall or 0, 2)
+                    }
+                },
+                'suggestions': [
+                    {
+                        'comment': suggestion.comment,
+                        'timestamp': suggestion.timestamp.isoformat(),
+                        'service_rating': suggestion.rating_service,
+                        'overall_rating': suggestion.rating_overall
+                    } for suggestion in suggestions
+                ],
+                'time_trends': [
+                    {
+                        'date': trend.date.isoformat(),
+                        'avg_service': float(trend.avg_service or 0),
+                        'avg_food': float(trend.avg_food or 0),
+                        'avg_cleanliness': float(trend.avg_cleanliness or 0),
+                        'avg_overall': float(trend.avg_overall or 0),
+                        'feedback_count': trend.feedback_count
+                    } for trend in daily_trends
+                ],
+                'service_distribution': [
+                    {
+                        'rating': dist.rating_service,
+                        'count': dist.count,
+                        'percentage': round((dist.count / total_feedbacks * 100), 2) if total_feedbacks > 0 else 0
+                    } for dist in service_distribution
+                ]
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
